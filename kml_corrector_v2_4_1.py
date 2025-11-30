@@ -270,26 +270,44 @@ class KMLCorrector:
         
         existing_polygon = self.root.find('.//kml:Polygon', namespaces=self.NS)
         if existing_polygon is None and len(points) >= 3:
-            document = self.root.find('.//kml:Document', namespaces=self.NS)
-            if document is None:
-                document = self.root.find('kml:Document', namespaces=self.NS)
-            
-            if document is not None:
-                placemark = etree.SubElement(document, '{http://www.opengis.net/kml/2.2}Placemark')
-                
-                name = etree.SubElement(placemark, '{http://www.opengis.net/kml/2.2}name')
-                name.text = f"{self.filename} POLYGON"
-                
-                styleUrl = etree.SubElement(placemark, '{http://www.opengis.net/kml/2.2}styleUrl')
-                styleUrl.text = '#polygonStyle'
-                
-                polygon_elem = self.create_polygon_with_style(points)
-                placemark.append(polygon_elem)
-                
-                self._add_polygon_style(document)
-                
-                created_polygon = True
-                snapped_count = len(points)
+
+            # 1️⃣ Find folder that contains the POINTS
+            folder = self.root.find('.//kml:Folder', namespaces=self.NS)
+
+            if folder is not None:
+                parent_container = folder
+
+                # Get folder name to use for polygon name
+                folder_name_elem = folder.find('kml:name', namespaces=self.NS)
+                if folder_name_elem is not None and folder_name_elem.text:
+                    polygon_name = folder_name_elem.text.strip() + " POLYGON"
+                else:
+                    polygon_name = f"{self.filename} POLYGON"
+            else:
+                # Fallback: place polygon in Document
+                parent_container = self.root.find('.//kml:Document', namespaces=self.NS)
+                polygon_name = f"{self.filename} POLYGON"
+
+            # 2️⃣ Create polygon placemark inside the correct folder
+            placemark = etree.SubElement(parent_container, '{http://www.opengis.net/kml/2.2}Placemark')
+
+            # Name
+            name = etree.SubElement(placemark, '{http://www.opengis.net/kml/2.2}name')
+            name.text = polygon_name
+
+            # Style (outline only)
+            styleUrl = etree.SubElement(placemark, '{http://www.opengis.net/kml/2.2}styleUrl')
+            styleUrl.text = '#outlinePolygonStyle'
+
+            # 3️⃣ Create polygon geometry
+            polygon_elem = self.create_polygon_with_style(points)
+            placemark.append(polygon_elem)
+
+            # 4️⃣ Ensure outline style exists
+            self._add_outline_polygon_style(parent_container)
+
+            created_polygon = True
+            snapped_count = len(points)
         
         return snapped_count, created_polygon
     
@@ -318,6 +336,33 @@ class KMLCorrector:
         
         document.append(style)
     
+    def _add_outline_polygon_style(self, document):
+        """Add outline-only polygon style for auto-created polygons."""
+        existing_style = self.root.find('.//kml:Style[@id="outlinePolygonStyle"]', namespaces=self.NS)
+        if existing_style is not None:
+            return
+
+        style = etree.Element('{http://www.opengis.net/kml/2.2}Style')
+        style.set('id', 'outlinePolygonStyle')
+
+        # LineStyle
+        line_style = etree.SubElement(style, '{http://www.opengis.net/kml/2.2}LineStyle')
+        line_color = etree.SubElement(line_style, '{http://www.opengis.net/kml/2.2}color')
+        line_color.text = 'ff0000ff'    # red, full opacity
+        line_width = etree.SubElement(line_style, '{http://www.opengis.net/kml/2.2}width')
+        line_width.text = '3'
+
+        # PolyStyle (outline only)
+        poly_style = etree.SubElement(style, '{http://www.opengis.net/kml/2.2}PolyStyle')
+        poly_color = etree.SubElement(poly_style, '{http://www.opengis.net/kml/2.2}color')
+        poly_color.text = 'ff0000ff'    # red, full opacity
+        poly_fill = etree.SubElement(poly_style, '{http://www.opengis.net/kml/2.2}fill')
+        poly_fill.text = '0'            # NO FILL
+        poly_outline = etree.SubElement(poly_style, '{http://www.opengis.net/kml/2.2}outline')
+        poly_outline.text = '1'
+
+        document.append(style)
+
     def get_corrected_kml(self) -> str:
         """Get corrected KML as string"""
         return etree.tostring(self.root, pretty_print=True, 
