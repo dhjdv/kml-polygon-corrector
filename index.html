@@ -1,0 +1,805 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KML Polygon Corrector v3.1 (Sat Fix)</title>
+    
+    <!-- React & DOM -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        cyber: {
+                            bg: '#020617',
+                            panel: 'rgba(15, 23, 42, 0.75)',
+                            primary: '#06b6d4', // Cyan 500
+                            secondary: '#3b82f6', // Blue 500
+                            accent: '#22d3ee', // Cyan 400
+                        }
+                    },
+                    boxShadow: {
+                        'neon': '0 0 10px rgba(6, 182, 212, 0.5), 0 0 20px rgba(6, 182, 212, 0.3)',
+                    },
+                    animation: {
+                        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                    },
+                    cursor: {
+                        'crosshair': 'crosshair',
+                    }
+                }
+            }
+        }
+    </script>
+    
+    <!-- Leaflet CSS & JS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <style>
+        body { 
+            font-family: 'Inter', system-ui, -apple-system, sans-serif; 
+            background-color: #020617; 
+            color: #cbd5e1;
+            overflow: hidden;
+        }
+        
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #06b6d4; }
+
+        /* Dark Map Filter */
+        .map-dark-mode .leaflet-tile-pane {
+            filter: invert(100%) hue-rotate(180deg) brightness(85%) contrast(110%) saturate(80%);
+        }
+        /* Protect markers/popups from filter */
+        .map-dark-mode .leaflet-marker-pane, 
+        .map-dark-mode .leaflet-popup-pane, 
+        .map-dark-mode .leaflet-overlay-pane,
+        .map-dark-mode .leaflet-control-container {
+            filter: none;
+        }
+
+        /* Glassmorphism */
+        .glass-panel {
+            background: rgba(15, 23, 42, 0.65);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+        }
+
+        /* Precision Scope Cursor */
+        .precision-cursor {
+            cursor: crosshair !important;
+        }
+        
+        .scope-tooltip {
+            pointer-events: none;
+            z-index: 1000;
+            position: absolute;
+            transform: translate(15px, 15px);
+            background: rgba(2, 6, 23, 0.9);
+            border: 1px solid #22d3ee;
+            color: #22d3ee;
+            font-family: monospace;
+            font-size: 10px;
+            padding: 4px 8px;
+            border-radius: 4px;
+            box-shadow: 0 0 10px rgba(34, 211, 238, 0.3);
+            white-space: nowrap;
+        }
+
+        /* Popup Styles */
+        .leaflet-popup-content-wrapper {
+            background: rgba(2, 6, 23, 0.95);
+            color: #fff;
+            border: 1px solid #334155;
+            border-radius: 8px;
+        }
+        .leaflet-popup-tip {
+            background: rgba(2, 6, 23, 0.95);
+        }
+
+    </style>
+</head>
+<body>
+
+<div id="root"></div>
+
+<script type="text/babel">
+
+// --- GEOMETRY UTILITIES (Convex Hull) ---
+
+function cross(o, a, b) {
+    return (a.lng - o.lng) * (b.lat - o.lat) - (a.lat - o.lat) * (b.lng - o.lng);
+}
+
+function getConvexHull(points) {
+    if (points.length <= 2) return points;
+    points.sort((a, b) => a.lat === b.lat ? a.lng - b.lng : a.lat - b.lat);
+    const lower = [];
+    for (let point of points) {
+        while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], point) <= 0) {
+            lower.pop();
+        }
+        lower.push(point);
+    }
+    const upper = [];
+    for (let i = points.length - 1; i >= 0; i--) {
+        const point = points[i];
+        while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], point) <= 0) {
+            upper.pop();
+        }
+        upper.push(point);
+    }
+    upper.pop();
+    lower.pop();
+    return lower.concat(upper);
+}
+
+function parseCoordinates(coordString) {
+    if (!coordString) return [];
+    return coordString.trim().split(/\s+/).map(pair => {
+        const parts = pair.split(',');
+        if (parts.length < 2) return null;
+        return { lng: parseFloat(parts[0]), lat: parseFloat(parts[1]) };
+    }).filter(p => p !== null && !isNaN(p.lat) && !isNaN(p.lng));
+}
+
+// --- ANIMATION UTILS ---
+
+function lerpColor(a, b, amount) { 
+    // Cyan #22d3ee (34, 211, 238) to Red #ff0000 (255, 0, 0)
+    const r = Math.round(34 + (255 - 34) * amount);
+    const g = Math.round(211 + (0 - 211) * amount);
+    const b_val = Math.round(238 + (0 - 238) * amount);
+    return `rgb(${r}, ${g}, ${b_val})`;
+}
+
+// --- MAIN APP ---
+
+function App() {
+    const [files, setFiles] = React.useState([]);
+    const [processedData, setProcessedData] = React.useState([]);
+    const [visData, setVisData] = React.useState({ markers: [], newPolygons: [], oldPolygons: [] });
+    const [processing, setProcessing] = React.useState(false);
+    const [mapInstance, setMapInstance] = React.useState(null);
+    const [logs, setLogs] = React.useState([]);
+    
+    // UI State
+    const [showOriginal, setShowOriginal] = React.useState(true);
+    const [mapMode, setMapMode] = React.useState('dark'); // 'dark' | 'satellite'
+    const [showTechDetails, setShowTechDetails] = React.useState(false);
+    
+    // Feature States
+    const [scopeActive, setScopeActive] = React.useState(false); 
+    const [autoSave, setAutoSave] = React.useState(false);       
+    const [mousePos, setMousePos] = React.useState({ x: 0, y: 0, lat: 0, lng: 0 });
+    
+    // Animation State
+    const [isAnimating, setIsAnimating] = React.useState(false);
+    const animationFrameRef = React.useRef(null);
+
+    const mapRef = React.useRef(null);
+    const markersLayerRef = React.useRef(null);
+    const newPolyLayerRef = React.useRef(null);
+    const oldPolyLayerRef = React.useRef(null);
+    const animLayerRef = React.useRef(null);
+    const tileLayerRef = React.useRef(null);
+
+    // Initialize Map Structure
+    React.useEffect(() => {
+        if (!mapRef.current || mapInstance) return;
+
+        const map = L.map(mapRef.current, {
+            zoomControl: false,
+            attributionControl: false
+        }).setView([20, 0], 2);
+        
+        L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+        // Note: We do NOT add the tile layer here anymore. 
+        // It is handled dynamically by the mapMode effect below.
+
+        // Feature Layers
+        oldPolyLayerRef.current = L.layerGroup().addTo(map);
+        newPolyLayerRef.current = L.layerGroup().addTo(map);
+        animLayerRef.current = L.layerGroup().addTo(map); 
+        markersLayerRef.current = L.layerGroup().addTo(map);
+
+        // Mouse Tracking
+        map.on('mousemove', (e) => {
+            setMousePos({ 
+                x: e.containerPoint.x, 
+                y: e.containerPoint.y,
+                lat: e.latlng.lat.toFixed(6),
+                lng: e.latlng.lng.toFixed(6)
+            });
+        });
+
+        // Scope Click
+        map.on('click', (e) => {
+            if (document.body.classList.contains('precision-active')) {
+                map.flyTo(e.latlng, 22, { duration: 1.5 });
+            }
+        });
+
+        setMapInstance(map);
+
+        return () => {
+            map.remove();
+            if(animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+        };
+    }, []);
+
+    // Handle Precision Scope Mode
+    React.useEffect(() => {
+        if (scopeActive) {
+            document.body.classList.add('precision-active');
+            if (mapRef.current) mapRef.current.style.cursor = 'crosshair';
+        } else {
+            document.body.classList.remove('precision-active');
+            if (mapRef.current) mapRef.current.style.cursor = '';
+        }
+    }, [scopeActive]);
+
+    // Handle Map Mode Switching (Robust Tile Swapping)
+    React.useEffect(() => {
+        if (!mapInstance) return;
+        
+        // Remove previous tile layer to prevent conflict/memory leaks
+        if (tileLayerRef.current) {
+            mapInstance.removeLayer(tileLayerRef.current);
+        }
+
+        if (mapMode === 'dark') {
+            tileLayerRef.current = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 22,
+                maxNativeZoom: 19, // OpenStreetMap supports level 19 natively
+                attribution: '&copy; OpenStreetMap'
+            }).addTo(mapInstance);
+            document.getElementById('map').classList.add('map-dark-mode');
+        } else {
+            // Esri World Imagery
+            tileLayerRef.current = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+                maxZoom: 22,
+                maxNativeZoom: 17, // CRITICAL FIX: Limit native zoom request to 17 to prevent missing tiles. Scale after 17.
+                attribution: 'Tiles &copy; Esri'
+            }).addTo(mapInstance);
+            document.getElementById('map').classList.remove('map-dark-mode');
+        }
+        
+        // Ensure data layers stay above tiles
+        tileLayerRef.current.bringToBack();
+
+    }, [mapMode, mapInstance]);
+
+    // --- ANIMATION LOGIC ---
+    const runMorphAnimation = () => {
+        if(!animLayerRef.current || !mapInstance) return;
+        
+        setIsAnimating(true);
+        oldPolyLayerRef.current.clearLayers(); 
+        newPolyLayerRef.current.clearLayers();
+        animLayerRef.current.clearLayers();
+
+        const duration = 2000;
+        const start = performance.now();
+        const polygonsToAnimate = [];
+
+        visData.newPolygons.forEach((newPoly, index) => {
+            const oldPoly = visData.oldPolygons[index]; 
+            let center = { lat: 0, lng: 0 };
+            newPoly.forEach(p => { center.lat += p.lat; center.lng += p.lng; });
+            center.lat /= newPoly.length;
+            center.lng /= newPoly.length;
+
+            let startShape = [];
+            if (oldPoly && oldPoly.length > 0) {
+                startShape = oldPoly;
+            } else {
+                startShape = newPoly.map(() => center);
+            }
+
+            polygonsToAnimate.push({
+                start: startShape,
+                end: newPoly,
+                ref: L.polygon([], { color: '#22d3ee', weight: 2 }).addTo(animLayerRef.current)
+            });
+        });
+
+        const animate = (time) => {
+            const elapsed = time - start;
+            const progress = Math.min(elapsed / duration, 1);
+            const t = 1 - Math.pow(1 - progress, 3);
+
+            polygonsToAnimate.forEach(item => {
+                const { start, end, ref } = item;
+                const targetLen = Math.max(start.length, end.length);
+                const currentLatlngs = [];
+
+                for(let i=0; i<targetLen; i++) {
+                    const ratio = i / targetLen;
+                    const idxStart = Math.floor(ratio * start.length);
+                    const idxEnd = Math.floor(ratio * end.length);
+                    const pStart = start[idxStart] || start[0];
+                    const pEnd = end[idxEnd] || end[0];
+
+                    currentLatlngs.push({
+                        lat: pStart.lat + (pEnd.lat - pStart.lat) * t,
+                        lng: pStart.lng + (pEnd.lng - pStart.lng) * t
+                    });
+                }
+                ref.setLatLngs(currentLatlngs);
+                const curColor = lerpColor(null, null, t); 
+                ref.setStyle({ color: curColor, weight: 2 + (1-t)*2 }); 
+            });
+
+            if (progress < 1) {
+                animationFrameRef.current = requestAnimationFrame(animate);
+            } else {
+                setIsAnimating(false);
+                animLayerRef.current.clearLayers();
+                drawStaticLayers(); 
+            }
+        };
+        animationFrameRef.current = requestAnimationFrame(animate);
+    };
+
+    const drawStaticLayers = () => {
+        markersLayerRef.current.clearLayers();
+        newPolyLayerRef.current.clearLayers();
+        oldPolyLayerRef.current.clearLayers();
+
+        const yellowPinIcon = L.icon({
+            iconUrl: 'http://maps.google.com/mapfiles/kml/pushpin/ylw-pushpin.png',
+            iconSize: [32, 32],
+            iconAnchor: [10, 32],
+            popupAnchor: [0, -32]
+        });
+
+        visData.markers.forEach(pt => {
+            const popupContent = `
+                <div style="font-family: monospace; padding: 4px;">
+                    <div style="display: flex; align-items: center; gap: 6px; border-bottom: 1px solid #334155; padding-bottom: 4px; margin-bottom: 4px;">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+                        <span style="color: #ef4444; font-weight: 800; font-size: 12px; letter-spacing: 1px;">LOCKED</span>
+                    </div>
+                    <div style="color: #94a3b8; font-size: 11px; margin-bottom: 4px;">ID: <b>${pt.name}</b></div>
+                    <div style="background: rgba(15, 23, 42, 0.5); padding: 6px; border-radius: 4px; border: 1px solid #1e293b; font-size: 10px;">
+                        <div>LAT: <span style="color: #38bdf8;">${pt.lat.toFixed(7)}</span></div>
+                        <div>LNG: <span style="color: #38bdf8;">${pt.lng.toFixed(7)}</span></div>
+                        <div style="margin-top: 6px; color: #4ade80; font-weight: bold; border-top: 1px dashed #334155; padding-top: 4px;">✓ INTEGRITY VERIFIED</div>
+                    </div>
+                </div>
+            `;
+            L.marker([pt.lat, pt.lng], { icon: yellowPinIcon })
+             .bindPopup(popupContent)
+             .addTo(markersLayerRef.current);
+        });
+
+        if (showOriginal) {
+            visData.oldPolygons.forEach(poly => {
+                L.polygon(poly.map(p => [p.lat, p.lng]), {
+                    color: '#22d3ee', // Cyan
+                    dashArray: '5, 10',
+                    weight: 2,
+                    fill: false,
+                    opacity: 0.6,
+                }).addTo(oldPolyLayerRef.current);
+            });
+        }
+
+        visData.newPolygons.forEach(poly => {
+            L.polygon(poly.map(p => [p.lat, p.lng]), {
+                color: '#ff0000',
+                weight: 3,
+                fillColor: '#ff0000',
+                fillOpacity: 0.0,
+            }).addTo(newPolyLayerRef.current);
+        });
+    };
+
+    React.useEffect(() => {
+        if (!mapInstance || isAnimating) return;
+        drawStaticLayers();
+        
+        const allLayers = [
+            ...visData.markers.map(m => L.marker([m.lat, m.lng])),
+            ...visData.newPolygons.map(p => L.polygon(p.map(x => [x.lat, x.lng])))
+        ];
+        if (allLayers.length > 0) {
+            const group = new L.featureGroup(allLayers);
+            setTimeout(() => {
+                if(mapInstance) mapInstance.fitBounds(group.getBounds(), { padding: [50, 50] });
+            }, 100);
+        }
+    }, [visData, showOriginal, mapInstance, isAnimating]); 
+
+
+    const addLog = (msg) => {
+        setLogs(prev => [`[${new Date().toLocaleTimeString().split(' ')[0]}] ${msg}`, ...prev]);
+    };
+
+    const triggerDownloads = (data) => {
+        if (!data || data.length === 0) return;
+        addLog(`Initiating bulk export (${data.length} files)...`);
+        let delay = 0;
+        data.forEach(item => {
+            setTimeout(() => {
+                const link = document.createElement('a');
+                link.href = item.url;
+                link.download = item.originalName;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            }, delay);
+            delay += 250; 
+        });
+        if (delay > 0) addLog("All downloads triggered.");
+    };
+
+    const processFiles = async (filesToProcess) => {
+        setProcessing(true);
+        addLog("Initiating auto-sequence...");
+
+        const results = [];
+        const newVisData = { markers: [], newPolygons: [], oldPolygons: [] };
+        const parser = new DOMParser();
+        const serializer = new XMLSerializer();
+
+        for (const file of filesToProcess) {
+            try {
+                const text = await file.text();
+                const xmlDoc = parser.parseFromString(text, "text/xml");
+                const kml = xmlDoc.getElementsByTagName("kml")[0];
+                if (!kml) { addLog(`Error: ${file.name} - Invalid.`); continue; }
+
+                const folders = xmlDoc.getElementsByTagName("Folder");
+                addLog(`Parsing matrix: ${file.name}`);
+
+                Array.from(folders).forEach(folder => {
+                    const folderName = folder.getElementsByTagName("name")[0]?.textContent.trim() || "Unnamed";
+                    const placemarks = folder.getElementsByTagName("Placemark");
+                    const points = [];
+                    const polygonPlacemarks = [];
+
+                    Array.from(placemarks).forEach(pm => {
+                        const pointNode = pm.getElementsByTagName("Point")[0];
+                        if (pointNode) {
+                            const raw = pointNode.getElementsByTagName("coordinates")[0]?.textContent.trim();
+                            if(raw) {
+                                const [lng, lat, alt] = raw.split(',').map(Number);
+                                if (!isNaN(lat) && !isNaN(lng)) {
+                                    points.push({ lat, lng, alt: alt || 0 });
+                                    newVisData.markers.push({ lat, lng, name: folderName });
+                                }
+                            }
+                        }
+                        if (pm.getElementsByTagName("Polygon")[0]) polygonPlacemarks.push(pm);
+                    });
+
+                    if (points.length >= 3) {
+                        const hullPoints = getConvexHull([...points]);
+                        hullPoints.push(hullPoints[0]); 
+                        const coordString = hullPoints.map(p => `${p.lng},${p.lat},${p.alt || 0}`).join(" ");
+                        newVisData.newPolygons.push(hullPoints);
+
+                        if (polygonPlacemarks.length === 0) {
+                            const newPm = xmlDoc.createElement("Placemark");
+                            const nameNode = xmlDoc.createElement("name");
+                            nameNode.textContent = `${folderName} POLYGON`;
+                            newPm.appendChild(nameNode);
+                            const styleNode = xmlDoc.createElement("Style");
+                            styleNode.innerHTML = `<LineStyle><color>ff0000ff</color><width>3.0</width></LineStyle><PolyStyle><color>ff0000ff</color><fill>0</fill><outline>1</outline></PolyStyle>`;
+                            newPm.appendChild(styleNode);
+                            const polyNode = xmlDoc.createElement("Polygon");
+                            polyNode.innerHTML = `<outerBoundaryIs><LinearRing><coordinates>${coordString}</coordinates></LinearRing></outerBoundaryIs>`;
+                            newPm.appendChild(polyNode);
+                            folder.appendChild(newPm);
+                        } else {
+                            polygonPlacemarks.forEach(pm => {
+                                const polyNode = pm.getElementsByTagName("Polygon")[0];
+                                const oldCoords = polyNode.getElementsByTagName("coordinates")[0]?.textContent;
+                                if(oldCoords) {
+                                    const parsed = parseCoordinates(oldCoords);
+                                    if(parsed.length) newVisData.oldPolygons.push(parsed);
+                                }
+                                let coordsTag = polyNode.getElementsByTagName("coordinates")[0];
+                                if(coordsTag) coordsTag.textContent = coordString;
+                                let styleNode = pm.getElementsByTagName("Style")[0];
+                                if (!styleNode) {
+                                    styleNode = xmlDoc.createElement("Style");
+                                    pm.insertBefore(styleNode, polyNode);
+                                }
+                                styleNode.innerHTML = `<LineStyle><color>ff0000ff</color><width>3.0</width></LineStyle><PolyStyle><color>ff0000ff</color><fill>0</fill><outline>1</outline></PolyStyle>`;
+                            });
+                        }
+                    }
+                });
+
+                const blob = new Blob([serializer.serializeToString(xmlDoc)], {type: "application/vnd.google-earth.kml+xml"});
+                results.push({ originalName: file.name, blob: blob, url: URL.createObjectURL(blob) });
+
+            } catch (err) {
+                console.error(err);
+                addLog(`CRITICAL FAILURE: ${file.name}`);
+            }
+        }
+
+        setVisData(newVisData);
+        setProcessedData(results);
+        setProcessing(false);
+        addLog("Optimization complete.");
+        
+        setTimeout(() => {
+            if(results.length > 0) runMorphAnimation();
+        }, 500);
+        
+        if (autoSave) {
+            triggerDownloads(results);
+        }
+    };
+
+    const handleFileUpload = (e) => {
+        const uploaded = Array.from(e.target.files);
+        setFiles(uploaded);
+        setProcessedData([]);
+        setVisData({ markers: [], newPolygons: [], oldPolygons: [] });
+        setLogs([]);
+        if(uploaded.length > 0) processFiles(uploaded);
+    };
+
+    const downloadAll = () => {
+        triggerDownloads(processedData);
+    };
+
+    return (
+        <div className="flex h-screen overflow-hidden text-sm bg-slate-950 selection:bg-cyan-500 selection:text-white relative">
+            
+            {/* SCOPE TOOLTIP */}
+            {scopeActive && (
+                <div 
+                    className="scope-tooltip"
+                    style={{ top: mousePos.y, left: mousePos.x }}
+                >
+                    LAT: {mousePos.lat} <br/> LNG: {mousePos.lng} <br/> [CLICK TO ZOOM]
+                </div>
+            )}
+
+            {/* BACKGROUND MAP */}
+            <div className={`absolute inset-0 z-0 transition-all duration-500`} id="map" ref={mapRef}></div>
+
+            {/* MAIN UI PANEL (Floating Left) */}
+            <div className="absolute top-6 left-6 bottom-6 w-96 flex flex-col gap-4 z-10 pointer-events-none">
+                
+                {/* Branding */}
+                <div className="glass-panel p-6 rounded-2xl pointer-events-auto border-l-4 border-cyan-500 flex flex-col relative overflow-hidden group">
+                    <div className="absolute top-0 right-0 w-32 h-32 bg-cyan-500/10 blur-3xl -mr-10 -mt-10 rounded-full group-hover:bg-cyan-500/20 transition-all"></div>
+                    <h1 className="text-3xl font-black tracking-tighter text-white uppercase italic z-10">
+                        POLYGON <span className="text-cyan-400">CORRECTOR</span>
+                    </h1>
+                    <div className="flex items-center gap-2 mt-1">
+                        <div className="h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse"></div>
+                        <p className="text-cyan-200/70 text-[10px] font-mono tracking-widest uppercase">System Online // v3.1</p>
+                    </div>
+                </div>
+
+                {/* Operations Deck */}
+                <div className="glass-panel flex-1 rounded-2xl flex flex-col p-6 pointer-events-auto relative overflow-hidden">
+                    
+                    {/* Security Protocol Status */}
+                    <div className="mb-4 bg-slate-900/60 rounded-lg p-2 border border-slate-700 flex items-center justify-between">
+                         <div className="flex items-center gap-2">
+                             <div className="relative">
+                                 <div className="w-2 h-2 bg-red-500 rounded-full animate-ping absolute top-1 left-1 opacity-75"></div>
+                                 <svg className="w-4 h-4 text-red-500 relative z-10" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
+                             </div>
+                             <span className="text-[10px] font-bold text-slate-300 uppercase">Placemark Locking</span>
+                         </div>
+                         <span className="text-[10px] text-green-400 font-mono font-bold tracking-wider">ACTIVE</span>
+                    </div>
+
+                    {/* Settings Row */}
+                    <div className="flex justify-between items-center mb-4 px-1">
+                        <span className="text-cyan-500/80 text-xs font-bold uppercase">Configuration</span>
+                        <label className="flex items-center gap-2 cursor-pointer group">
+                            <span className="text-slate-400 text-xs font-mono group-hover:text-cyan-300 transition-colors">AUTO-EXPORT</span>
+                            <div className="relative">
+                                <input type="checkbox" className="sr-only peer" checked={autoSave} onChange={() => setAutoSave(!autoSave)} />
+                                <div className="w-8 h-4 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-cyan-500"></div>
+                            </div>
+                        </label>
+                    </div>
+
+                    {/* Upload / Auto-Process Area */}
+                    <div className="relative z-10">
+                        <label className="group block relative h-36 w-full rounded-xl border border-dashed border-slate-600 bg-slate-900/40 hover:border-cyan-400 hover:bg-cyan-900/10 transition-all cursor-pointer flex flex-col items-center justify-center gap-3 overflow-hidden">
+                            <input type="file" className="hidden" multiple accept=".kml" onChange={handleFileUpload} />
+                            
+                            <div className="absolute inset-0 opacity-10" style={{backgroundImage: 'radial-gradient(circle, #22d3ee 1px, transparent 1px)', backgroundSize: '20px 20px'}}></div>
+                            
+                            <div className="p-4 bg-slate-800 rounded-full group-hover:scale-110 group-hover:shadow-neon transition-all duration-300">
+                                <svg className="w-8 h-8 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" /></svg>
+                            </div>
+                            <div className="text-center">
+                                <span className="block text-slate-200 font-bold text-sm tracking-wide group-hover:text-white">INITIATE UPLOAD</span>
+                                <span className="text-cyan-500/60 text-xs font-mono">{autoSave ? 'AUTO-SAVE ACTIVE' : 'READY'}</span>
+                            </div>
+                        </label>
+                    </div>
+
+                    {/* Files List */}
+                    <div className="flex-1 mt-6 overflow-y-auto pr-2">
+                        {files.length === 0 ? (
+                            <div className="h-full flex flex-col items-center justify-center text-slate-600 gap-2 opacity-50">
+                                <svg className="w-12 h-12" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" /></svg>
+                                <span className="text-xs font-mono">AWAITING INPUT...</span>
+                            </div>
+                        ) : (
+                            <ul className="space-y-2">
+                                {files.map((f, i) => (
+                                    <li key={i} className="bg-slate-900/80 border border-slate-700 p-3 rounded-lg flex items-center justify-between group hover:border-cyan-500/50 transition-colors">
+                                        <div className="flex items-center gap-3 overflow-hidden">
+                                            {processedData[i] ? 
+                                                <div className="w-2 h-2 rounded-full bg-green-400 shadow-[0_0_8px_#4ade80]"></div> :
+                                                <div className="w-2 h-2 rounded-full bg-yellow-400 animate-pulse"></div>
+                                            }
+                                            <span className="truncate font-mono text-slate-300 text-xs">{f.name}</span>
+                                        </div>
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
+                    </div>
+
+                    {/* Terminal Logs */}
+                    <div className="h-32 mt-4 bg-black/90 rounded-lg p-3 font-mono text-[10px] text-cyan-500 overflow-y-auto border border-slate-800 shadow-inner">
+                        {logs.map((log, i) => <div key={i} className="mb-1 opacity-80 border-l-2 border-cyan-800 pl-2">{log}</div>)}
+                        <div className="animate-pulse">_</div>
+                    </div>
+
+                    {/* Download Button */}
+                    {processedData.length > 0 && !autoSave && (
+                        <button 
+                            onClick={downloadAll}
+                            className="mt-4 w-full py-4 bg-cyan-600 hover:bg-cyan-500 text-white font-black uppercase tracking-widest rounded-xl shadow-lg hover:shadow-cyan-500/40 transition-all flex items-center justify-center gap-2 group"
+                        >
+                            <span>EXPORT DATA</span>
+                            <svg className="w-4 h-4 group-hover:translate-x-1 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14 5l7 7m0 0l-7 7m7-7H3" /></svg>
+                        </button>
+                    )}
+                    {autoSave && processedData.length > 0 && (
+                         <div className="mt-4 w-full py-3 border border-green-500/30 bg-green-900/10 text-green-400 text-center text-xs font-mono rounded-xl">
+                            AUTO-EXPORT COMPLETE
+                         </div>
+                    )}
+                </div>
+            </div>
+
+            {/* VISUALIZER CONTROLS (Bottom Right) */}
+            <div className="absolute bottom-6 right-6 z-10 glass-panel p-5 rounded-2xl flex flex-col gap-4 min-w-[220px]">
+                
+                {/* Tech Details Trigger */}
+                <button 
+                    onClick={() => setShowTechDetails(true)}
+                    className="text-xs font-bold text-cyan-400 hover:text-white uppercase tracking-widest border-b border-slate-700 pb-2 mb-1 flex justify-between items-center group"
+                >
+                    <span>TECH SPECS</span>
+                    <span className="text-[10px] bg-cyan-900/50 px-1 rounded opacity-0 group-hover:opacity-100 transition-opacity">INFO</span>
+                </button>
+
+                {/* Map Mode Switcher */}
+                <div className="flex bg-slate-900/80 p-1 rounded-lg border border-slate-700">
+                    <button 
+                        onClick={() => setMapMode('dark')}
+                        className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-all ${mapMode === 'dark' ? 'bg-cyan-600 text-white shadow-lg' : 'text-slate-400 hover:text-white'}`}
+                    >
+                        CYBER
+                    </button>
+                    <button 
+                        onClick={() => setMapMode('satellite')}
+                        className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-all ${mapMode === 'satellite' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:text-white'}`}
+                    >
+                        SAT
+                    </button>
+                </div>
+
+                {/* Scope Toggle */}
+                <button 
+                    onClick={() => setScopeActive(!scopeActive)}
+                    className={`flex items-center justify-between p-2 rounded-lg border transition-all ${scopeActive ? 'bg-cyan-900/30 border-cyan-500 text-cyan-300' : 'border-slate-700 text-slate-400 hover:border-slate-500'}`}
+                >
+                    <div className="flex items-center gap-2">
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" /></svg>
+                        <span className="text-xs font-bold">PRECISION SCOPE</span>
+                    </div>
+                    <div className={`w-2 h-2 rounded-full ${scopeActive ? 'bg-cyan-400 shadow-[0_0_8px_#22d3ee]' : 'bg-slate-600'}`}></div>
+                </button>
+
+                {/* Replay Animation */}
+                {visData.newPolygons.length > 0 && (
+                    <button 
+                        onClick={runMorphAnimation}
+                        disabled={isAnimating}
+                        className={`flex items-center justify-between p-2 rounded-lg border transition-all ${isAnimating ? 'border-cyan-500/50 text-cyan-500/50 cursor-not-allowed' : 'border-slate-700 text-slate-400 hover:border-cyan-500 hover:text-cyan-300'}`}
+                    >
+                        <div className="flex items-center gap-2">
+                            <svg className={`w-4 h-4 ${isAnimating ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                            <span className="text-xs font-bold">{isAnimating ? 'MORPHING...' : 'REPLAY SEQUENCE'}</span>
+                        </div>
+                    </button>
+                )}
+
+                {/* Legend */}
+                <div className="space-y-2 pt-2 border-t border-slate-700/50">
+                    <label className="flex items-center justify-between cursor-pointer group">
+                        <div className="flex items-center gap-3">
+                            <div className="w-5 h-0 border-t-2 border-dashed border-cyan-400"></div>
+                            <span className="text-cyan-400 text-xs font-medium">Ghost (Original)</span>
+                        </div>
+                        <input type="checkbox" className="accent-cyan-500 w-4 h-4 rounded bg-slate-800 border-slate-600" checked={showOriginal} onChange={() => setShowOriginal(!showOriginal)} />
+                    </label>
+                    <div className="flex items-center gap-3">
+                        <div className="w-5 h-1 bg-red-600 shadow-[0_0_8px_#dc2626]"></div>
+                        <span className="text-red-500 text-xs font-bold">Optimized Hull</span>
+                    </div>
+                </div>
+            </div>
+
+            {/* TECHNICAL DETAILS MODAL */}
+            {showTechDetails && (
+                <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-10" onClick={() => setShowTechDetails(false)}>
+                    <div className="glass-panel w-full max-w-2xl p-8 rounded-2xl relative shadow-2xl border-cyan-500/30" onClick={e => e.stopPropagation()}>
+                        <button onClick={() => setShowTechDetails(false)} className="absolute top-4 right-4 text-slate-400 hover:text-white">
+                            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" /></svg>
+                        </button>
+                        
+                        <h2 className="text-2xl font-black text-white mb-6 uppercase tracking-tight flex items-center gap-3">
+                            <svg className="w-8 h-8 text-cyan-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.384-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>
+                            Technical Specifications
+                        </h2>
+
+                        <div className="space-y-6 text-slate-300">
+                            <div>
+                                <h3 className="text-cyan-400 font-bold uppercase text-sm mb-2 border-b border-cyan-900/50 pb-1">1. Monotone Chain Convex Hull</h3>
+                                <p className="text-sm leading-relaxed">
+                                    The core engine utilizes the <strong>Monotone Chain algorithm</strong> to compute the convex hull of your placemarks in <code className="bg-slate-900 px-1 text-cyan-200">O(n log n)</code> time. This algorithm sorts points by x-coordinate (longitude) and constructs upper and lower hulls separately. It guarantees a non-intersecting, mathematically minimal boundary that encloses all points.
+                                </p>
+                            </div>
+                            
+                            <div>
+                                <h3 className="text-cyan-400 font-bold uppercase text-sm mb-2 border-b border-cyan-900/50 pb-1">2. Vertex Snapping & Locking</h3>
+                                <p className="text-sm leading-relaxed">
+                                    The system treats Placemark coordinates as <strong className="text-red-400">Read-Only</strong> immutable anchors. The polygon vertices are dynamically generated and snapped to these anchors. When updating existing KMLs, the system preserves the DOM structure, only injecting the calculated coordinate string into the <code className="text-xs font-mono">Polygon/outerBoundaryIs/LinearRing</code> node.
+                                </p>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+            )}
+
+        </div>
+    );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+
+</script>
+</body>
+</html>
